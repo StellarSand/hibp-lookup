@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+
+# Copyright (C) 2025-present StellarSand
+
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+usage() {
+  cat <<EOF
+
+Usage:
+  $(basename "$0") <email>
+  $(basename "$0") -f <file>
+
+Options:
+  <email>             Check a single email address
+  -f <file>           Check multiple email addresses from a text file (one per line).
+  -c, --compact       Print data without details & additional links
+  -h, --help          Show this help message
+
+Examples:
+  $(basename "$0") johndoe@example.com
+  $(basename "$0") -f /home/JaneDoe/Downloads/emails.txt
+
+EOF
+}
+
+has_command() {
+  command -v "$1" > /dev/null
+}
+
+parse_data() {
+  if [[ "$COMPACT" == true ]]; then
+    echo "$1" | jq -r '
+      .Breaches| sort_by(.BreachDate) | reverse | .[] |
+      (
+        ">> \(.BreachDate | strptime("%Y-%m-%d") | strftime("%b %d, %Y"))\n" +
+        ">> \(.Title)" + (if (.Domain | length) > 0 then " (\(.Domain))" else "" end) + "\n" +
+        ">> Compromised data: \(.DataClasses | join(", "))\n" +
+        "\n--------------------------------------------------\n"
+      )
+    '
+  else
+    echo "$1" | jq -r '
+      .Breaches| sort_by(.BreachDate) | reverse | .[] |
+      (
+        .Description as $desc |
+        ($desc | gsub("<[^>]+>"; "")) as $cleanDesc |
+        ($desc | capture("<a href=\"(?<url>[^\"]+)\"")? | .url) as $url |
+        ">> \(.BreachDate | strptime("%Y-%m-%d") | strftime("%b %d, %Y"))\n" +
+        ">> \(.Title)" + (if (.Domain | length) > 0 then " (\(.Domain))" else "" end) + "\n" +
+        ">> Compromised data: \(.DataClasses | join(", "))\n" +
+        ">> Details: \($cleanDesc)\n" +
+        (if $url then ">> Additional links: \($url)\n" else "" end) +
+        "\n--------------------------------------------------\n"
+      )
+    '
+  fi
+}
+
+check_email() {
+  RESPONSE=$(curl -s "https://haveibeenpwned.com/unifiedsearch/$1" \
+    -H "User-Agent: hibp_lookup v1.0.0" \
+    -H "Accept: application/json" \
+    -w "\n%{http_code}") # append a new line with the HTTP status code
+
+  BODY=$(echo "$RESPONSE" | sed '$d') # Delete the last line (HTTP status code)
+  STATUS=$(echo "$RESPONSE" | tail -n1)
+
+  if [[ "$STATUS" == "404" ]]; then
+    echo -e "No breaches found.\n"
+    return
+  elif [[ "$STATUS" != "200" ]]; then
+    echo -e "Request failed (HTTP $STATUS)\n"
+    return
+  else
+    parse_data "$BODY"
+  fi
+}
+
+if ! has_command "jq"; then
+  echo -e "\nError: jq is not installed.\n"
+  exit 1
+fi
+
+if ! has_command "curl"; then
+  echo -e "\nError: curl is not installed.\n"
+  exit 1
+fi
+
+COMPACT=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h | --help)
+      usage
+      ;;
+    -c | --compact)
+      COMPACT=true
+      shift
+      ;;
+    -f)
+      FILE="$2"
+      if [[ -z "$2" ]]; then
+        echo -e "\nError: No file provided"
+        usage
+        exit 1
+      fi
+      shift 2
+      ;;
+    *)
+      EMAIL="$1"
+      shift
+      ;;
+  esac
+done
+
+if [[ -n "$FILE" ]]; then
+  i=0
+  while read -r EMAIL; do
+    [[ -z "$EMAIL" ]] && continue
+    echo -e "\n##################################################\n"
+    echo -e "[+] Checking: $EMAIL\n"
+    if (( i > 0 )); then
+      sleep 2 # sleep for 2 seconds from 2nd email onwards
+    fi
+    check_email "$EMAIL"
+    ((i++))
+  done < "$FILE"
+elif [[ -n "$EMAIL" ]]; then
+  echo -e "\nChecking ...\n"
+  check_email "$EMAIL"
+else
+  usage
+  exit 1
+fi
